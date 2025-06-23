@@ -1,0 +1,17 @@
+{
+  "name": "uni-scraper-api",
+  "version": "1.0.0",
+  "description": "University scraper exposed as an API for n8n.",
+  "main": "scraper.js",
+  "scripts": {
+    "start": "node scraper.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.0",
+    "cheerio": "^1.0.0-rc.12",
+    "express": "^4.21.2",
+    "puppeteer": "^22.10.0",
+    "url-parse": "^1.5.10",
+    "winston": "^3.13.0"
+  }
+}

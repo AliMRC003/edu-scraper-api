@@ -1,0 +1,10 @@
+# Dependency directories
+node_modules/
+
+# Log files
+*.log
+
+# Output files
+*.json
+!package.json
+!package-lock.json 
