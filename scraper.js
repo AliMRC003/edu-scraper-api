@@ -2,7 +2,8 @@ const express = require('express');
 const puppeteer = require('puppeteer');
 const URL = require('url-parse');
 const winston = require('winston');
-const config = require('./config'); // config.js dosyanızın var olduğunu varsayıyoruz
+const config = require('./config');
+const axios = require('axios');
 
 // --- Express Sunucusunu Ayarla ---
 const app = express();
@@ -14,11 +15,6 @@ const logger = winston.createLogger({
     level: 'info',
     transports: [ new winston.transports.Console({ format: winston.format.simple() }) ]
 });
-
-
-// --- Sizin Scraper Sınıfınız ve Mantığınız (Değişiklik Yok) ---
-// Buradaki kod, bir önceki cevaptakiyle neredeyse aynı,
-// sadece bir API isteği içinde çalışacak şekilde düzenlendi.
 
 function withTimeout(promise, ms, info) {
     if (!ms) return promise;
@@ -53,7 +49,7 @@ class UniScraper {
     async initialize() {
         this.browser = await puppeteer.launch({
             headless: 'new',
-            timeout: 90000, // Tarayıcının başlaması için 90 saniye bekle
+            timeout: 90000,
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
@@ -213,7 +209,7 @@ class UniScraper {
         }
     }
 
-    async processSingleUniversity(domain, seedUrlsForDomain) {
+    async processSingleUniversityAndPostToWebhook(domain, seedUrlsForDomain, workerWebhookUrl) {
         await this.initialize();
         
         const queue = [];
@@ -224,7 +220,7 @@ class UniScraper {
         seedUrlsForDomain.forEach(url => {
             const cleaned = cleanUrl(url);
             if (!visited.has(cleaned)) {
-                queue.push({ url: cleaned, depth: 0, score: 1000 });
+                queue.push({ url: cleaned, depth: 0, score: 1000 }); // Start with high score for seeds
                 visited.add(cleaned);
             }
         });
@@ -232,101 +228,121 @@ class UniScraper {
         let processedCount = 0;
         logger.info(`Processing domain: ${domain} with ${seedUrlsForDomain.length} seed URLs.`);
 
-        const allPromises = [];
+        const activePromises = new Set();
 
         const processQueue = async () => {
-             while (queue.length > 0 || this.activePages > 0) {
-                if (this.activePages >= config.crawler.concurrentPages || queue.length === 0) {
-                    await new Promise(resolve => setTimeout(resolve, 100));
-                    continue;
-                }
-                if (processedCount >= config.crawler.maxPagesPerDomain) {
-                    logger.info(`Max pages (${config.crawler.maxPagesPerDomain}) reached for ${domain}.`);
-                    break;
-                };
-                
-                queue.sort((a, b) => b.score - a.score);
-                const { url, depth, score } = queue.shift();
-                
-                if (depth >= config.crawler.maxDepth) continue;
-
-                const promise = this.crawlPage(url, depth, domain, score).then(result => {
-                    if (result === null) return;
-                    
-                    processedCount++;
-
-                    if (result.redirectedTo) {
-                        const newUrl = cleanUrl(result.redirectedTo);
-                        if (!visited.has(newUrl)) {
-                            visited.add(newUrl);
-                            queue.push({ url: newUrl, depth: depth, score: score + 50 });
-                        }
-                    } 
-                    else if (Array.isArray(result)) {
-                        const minScoreThreshold = 15;
-                        result.forEach(link => {
-                            const cleanedLink = cleanUrl(link);
-                            if (!visited.has(cleanedLink)) {
-                                visited.add(cleanedLink);
-                                 try {
-                                    const parsedLink = new URL(cleanedLink);
-                                    if (!config.shouldExcludePath(parsedLink.pathname, parsedLink.search)) {
-                                        const newScore = this._calculateFinalScore(cleanedLink, depth + 1);
-                                        if (newScore >= minScoreThreshold) {
-                                            queue.push({ url: cleanedLink, depth: depth + 1, score: newScore });
-                                        }
-                                    }
-                                 } catch(e) {
-                                     logger.warn(`Skipping invalid link: ${cleanedLink}`);
-                                 }
-                            }
-                        });
+            while (queue.length > 0 || activePromises.size > 0) {
+                while (activePromises.size < config.crawler.concurrentPages && queue.length > 0) {
+                    if (processedCount >= config.crawler.maxPagesPerDomain) {
+                        logger.info(`Max pages (${config.crawler.maxPagesPerDomain}) reached for ${domain}.`);
+                        break;
                     }
-                });
-                allPromises.push(promise);
-             }
+
+                    queue.sort((a, b) => b.score - a.score);
+                    const { url, depth } = queue.shift();
+
+                    if (depth > config.crawler.maxDepth) continue;
+
+                    processedCount++;
+                    
+                    const promise = (async () => {
+                        const score = this._calculateFinalScore(url, depth);
+                        const crawlResult = await this.crawlPage(url, depth, domain, score);
+                        if (!crawlResult) return;
+        
+                        if (crawlResult.redirectedTo) {
+                            const newUrl = crawlResult.redirectedTo;
+                            if (!visited.has(newUrl) && new URL(newUrl).hostname === domain) {
+                                 const newScore = this._calculateFinalScore(newUrl, depth);
+                                 queue.push({ url: newUrl, depth: depth, score: newScore });
+                                 visited.add(newUrl);
+                            }
+                            return;
+                        }
+        
+                        if (Array.isArray(crawlResult)) {
+                            crawlResult.forEach(link => {
+                                const cleanedLink = cleanUrl(link);
+                                if (!visited.has(cleanedLink)) {
+                                    visited.add(cleanedLink);
+                                    const newScore = this._calculateFinalScore(cleanedLink, depth + 1);
+                                    if (newScore > (config.crawler.minScoreToQ || 0)) {
+                                         queue.push({ url: cleanedLink, depth: depth + 1, score: newScore });
+                                    }
+                                }
+                            });
+                        }
+                    })().finally(() => {
+                        activePromises.delete(promise);
+                    });
+                    activePromises.add(promise);
+                }
+
+                if (processedCount >= config.crawler.maxPagesPerDomain) break;
+
+                await new Promise(resolve => setTimeout(resolve, 100));
+            }
+        };
+
+        await processQueue();
+        await Promise.allSettled([...activePromises]);
+
+        if (this.results.length > 0) {
+            try {
+                logger.info(`Posting ${this.results.length} results to worker webhook for domain ${domain}`);
+                await axios.post(workerWebhookUrl, this.results);
+            } catch (e) {
+                logger.error(`Failed to post results to webhook for ${domain}: ${e.message}`);
+            }
         }
         
-        await processQueue();
-        await Promise.allSettled(allPromises);
-        
         await this.close();
-        logger.info(`✅ Scraping complete for ${domain}. Total results: ${this.results.length}`);
-        return this.results;
+        logger.info(`✅ BACKGROUND scraping and posting complete for ${domain}.`);
     }
 }
 
+// --- API Uç Noktası (Endpoint) - ASENKRON MODEL ---
+app.post('/scrape', (req, res) => {
+    const { domain, seedUrls, workerWebhookUrl } = req.body;
 
-// --- API Uç Noktası (Endpoint) ---
-app.post('/scrape', async (req, res) => {
-    const { domain, seedUrls } = req.body;
-
-    if (!domain || !seedUrls || !Array.isArray(seedUrls)) {
-        return res.status(400).json({ error: 'Missing or invalid parameters. "domain" (string) and "seedUrls" (array) are required.' });
+    if (!domain || !seedUrls || !Array.isArray(seedUrls) || !workerWebhookUrl) {
+        return res.status(400).json({ 
+            error: 'Missing parameters. "domain", "seedUrls" (array), and "workerWebhookUrl" are required.' 
+        });
     }
 
-    logger.info(`Received API request to scrape domain: ${domain}`);
-    
-    try {
-        const scraper = new UniScraper();
-        const scrapedData = await scraper.processSingleUniversity(domain, seedUrls);
-        res.status(200).json(scrapedData);
-    } catch (error) {
-        logger.error(`Scraping failed for ${domain}: ${error.message}`);
-        res.status(500).json({ error: 'An internal server error occurred during scraping.', details: error.message });
-    }
+    res.status(202).json({ 
+        message: "Scraping request accepted and is running in the background.",
+        domain: domain 
+    });
+
+    (async () => {
+        try {
+            logger.info(`BACKGROUND: Starting scrape for domain: ${domain}`);
+            const scraper = new UniScraper();
+            await scraper.processSingleUniversityAndPostToWebhook(domain, seedUrls, workerWebhookUrl);
+            logger.info(`BACKGROUND: Finished scrape for domain: ${domain}`);
+        } catch (error) {
+            logger.error(`BACKGROUND scraping failed for ${domain}: ${error.message}`);
+            try {
+                await axios.post(workerWebhookUrl, {
+                    error: true,
+                    domain: domain,
+                    message: `Scraping process failed: ${error.message}`,
+                    stack: error.stack
+                });
+            } catch (webhookError) {
+                logger.error(`Failed to post error report to webhook for domain ${domain}: ${webhookError.message}`);
+            }
+        }
+    })();
 });
 
-
-// YENİ EKLENECEK KOD BURADA
-// --- Health Check Uç Noktası ---
-// Render.com bu adrese GET isteği atarak servisin canlı olup olmadığını kontrol eder.
+// --- Health Check & Sunucu Başlatma ---
 app.get('/', (req, res) => {
-    res.status(200).send('Scraper API is up and running!');
+    res.status(200).send('Scraper API is running. Use POST /scrape to start a job.');
 });
 
-
-// Sunucuyu Başlat
 app.listen(PORT, () => {
-    logger.info(`Scraper API listening on port ${PORT}`);
+    logger.info(`Server listening on port ${PORT}`);
 });
