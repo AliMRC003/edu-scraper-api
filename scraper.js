@@ -58,9 +58,13 @@ class UniScraper {
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
-                '--single-process'
+                '--single-process',
+                // Chrome'u başsız modda ve yetkisiz çalıştırmak için ek bayraklar
+                '--disable-gpu',
+                '--window-size=1920,1080'
             ],
-            executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
+            // executablePath satırını siliyoruz veya yorum yapıyoruz
+            // executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
         });
     }
     
