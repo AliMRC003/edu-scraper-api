@@ -51,20 +51,18 @@ class UniScraper {
     }
 
     async initialize() {
-        // Render.com gibi ortamlarda sorunsuz çalışması için ek argümanlar
         this.browser = await puppeteer.launch({
             headless: 'new',
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
                 '--disable-dev-shm-usage',
-                '--single-process',
-                // Chrome'u başsız modda ve yetkisiz çalıştırmak için ek bayraklar
-                '--disable-gpu',
-                '--window-size=1920,1080'
-            ],
-            // executablePath satırını siliyoruz veya yorum yapıyoruz
-            // executablePath: process.env.PUPPETEER_EXECUTABLE_PATH,
+                '--disable-accelerated-2d-canvas',
+                '--no-first-run',
+                '--no-zygote',
+                // '--single-process', // Bu bazen sorun yaratabilir, şimdilik devre dışı bırakalım.
+                '--disable-gpu'
+            ]
         });
     }
     
