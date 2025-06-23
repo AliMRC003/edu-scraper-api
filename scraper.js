@@ -53,6 +53,7 @@ class UniScraper {
     async initialize() {
         this.browser = await puppeteer.launch({
             headless: 'new',
+            timeout: 90000, // Tarayıcının başlaması için 90 saniye bekle
             args: [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
@@ -60,7 +61,6 @@ class UniScraper {
                 '--disable-accelerated-2d-canvas',
                 '--no-first-run',
                 '--no-zygote',
-                // '--single-process', // Bu bazen sorun yaratabilir, şimdilik devre dışı bırakalım.
                 '--disable-gpu'
             ]
         });
