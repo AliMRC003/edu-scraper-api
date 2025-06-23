@@ -320,6 +320,14 @@ app.post('/scrape', async (req, res) => {
 });
 
 
+// YENİ EKLENECEK KOD BURADA
+// --- Health Check Uç Noktası ---
+// Render.com bu adrese GET isteği atarak servisin canlı olup olmadığını kontrol eder.
+app.get('/', (req, res) => {
+    res.status(200).send('Scraper API is up and running!');
+});
+
+
 // Sunucuyu Başlat
 app.listen(PORT, () => {
     logger.info(`Scraper API listening on port ${PORT}`);
